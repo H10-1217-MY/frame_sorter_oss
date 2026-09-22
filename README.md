@@ -99,3 +99,28 @@ output/
 - Added a bottom progress bar showing the current position in the video.
 - Displays current frame / total frames / percentage.
 - The progress bar is read-only for now to avoid accidental seeking during annotation.
+
+## v0.2.0
+
+固定の `OK / NG / Unknown` を廃止し、任意の分類をGUIから追加できるようにしました。
+
+- 右側の `＋ 分類を追加` から表示名・保存フォルダ名・キーを設定
+- 対応する保存フォルダを自動作成
+- `annotation_config.json` に設定保存
+- 同じプロジェクトフォルダを開くと設定を復元
+- 分類の編集・削除に対応
+- 分類を削除しても保存済み画像フォルダは削除しない安全設計
+- `Space` は次フレーム、`Backspace` はUndoとして予約
+
+設定例:
+
+```json
+{
+  "version": 1,
+  "labels": [
+    {"name": "写っている", "folder": "visible", "key": "1"},
+    {"name": "写っていない", "folder": "not_visible", "key": "2"},
+    {"name": "微妙", "folder": "unclear", "key": "3"}
+  ]
+}
+```
