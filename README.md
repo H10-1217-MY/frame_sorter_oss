@@ -124,3 +124,30 @@ output/
   ]
 }
 ```
+
+
+## v0.2.1
+
+- Fixed a save-destination synchronization bug when the project/output folder is changed after opening a video.
+- Dynamic label shortcuts now show the selected destination in the status bar.
+- Label shortcuts disable auto-repeat and report ambiguous shortcut assignments.
+- Destination folders are re-created automatically if they are missing.
+
+
+## v0.2.2
+
+- 日本語・Unicodeを含む保存パスへ対応。
+- 画像保存を `cv2.imwrite()` から `cv2.imencode() + numpy.tofile()` に変更。
+- 分類名、保存フォルダ名、プロジェクトパスに日本語を使用しやすくしました。
+- 新機能は追加せず、MVP安定化を目的とした版です。
+
+
+## v0.3.0
+
+- ROIを画像上の左ドラッグで指定
+- ドラッグ中も矩形を表示
+- 縮小表示座標を元フレーム座標へ自動変換
+- X / Y / W / H は確認用の読み取り専用表示
+- 「ROIをクリア」ボタンを追加
+- ROIは次フレームでも維持
+- 「ROIのみ保存」は従来通り利用可能

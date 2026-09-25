@@ -12,6 +12,25 @@ from PySide6.QtCore import QObject, Signal, Slot
 from .config import Roi
 
 
+
+def imwrite_unicode(path: Path, image: np.ndarray) -> None:
+    """Write an image safely even when the path contains Unicode characters."""
+    suffix = path.suffix.lower() or ".jpg"
+    supported = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
+    if suffix not in supported:
+        suffix = ".jpg"
+
+    ok, encoded = cv2.imencode(suffix, image)
+    if not ok:
+        raise RuntimeError(f"画像のエンコードに失敗しました: {path}")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        encoded.tofile(str(path))
+    except Exception as exc:
+        raise RuntimeError(f"画像の保存に失敗しました: {path}\n{exc}") from exc
+
+
 @dataclass
 class Action:
     frame_index: int
@@ -78,6 +97,18 @@ class VideoWorker(QObject):
             self.error.emit(str(exc))
         finally:
             self._set_busy(False)
+
+
+    @Slot(str)
+    def set_output_dir(self, output_dir: str) -> None:
+        """Update save destination without reopening the video."""
+        try:
+            path = Path(output_dir)
+            path.mkdir(parents=True, exist_ok=True)
+            self._output_dir = path
+            self.status.emit(f"Output: {self._output_dir}")
+        except Exception as exc:
+            self.error.emit(str(exc))
 
     @Slot(int)
     def set_interval(self, interval: int) -> None:
@@ -156,10 +187,10 @@ class VideoWorker(QObject):
                 filename = f"{self._path.stem}_f{self._current_index:09d}.jpg"
                 out_path = label_dir / filename
 
-                if not cv2.imwrite(str(out_path), image_to_save):
-                    raise RuntimeError(f"画像の保存に失敗しました: {out_path}")
+                imwrite_unicode(out_path, image_to_save)
 
                 saved_path = str(out_path)
+                self.status.emit(f"Saved: {out_path}")
 
             action = Action(
                 frame_index=self._current_index,

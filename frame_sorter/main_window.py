@@ -4,7 +4,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import QPoint, QRect, Qt, QThread, Signal
 from PySide6.QtGui import QImage, QKeySequence, QPainter, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -95,14 +95,20 @@ class LabelDialog(QDialog):
 
 
 class ImageView(QLabel):
+    roi_changed = Signal(int, int, int, int)
+
     def __init__(self) -> None:
         super().__init__()
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setMinimumSize(640, 360)
         self.setText("動画を開いてください")
+        self.setCursor(Qt.CursorShape.CrossCursor)
         self._frame_size = None
         self._roi = None
         self._source_pixmap = None
+        self._dragging = False
+        self._drag_start = None
+        self._drag_end = None
 
     def set_frame(self, frame: np.ndarray) -> None:
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -113,7 +119,15 @@ class ImageView(QLabel):
         self._update_scaled_pixmap()
 
     def set_roi(self, x: int, y: int, w: int, h: int) -> None:
-        self._roi = (x, y, w, h)
+        self._roi = (x, y, w, h) if w > 0 and h > 0 else None
+        self.update()
+
+    def clear_roi(self) -> None:
+        self._roi = None
+        self._dragging = False
+        self._drag_start = None
+        self._drag_end = None
+        self.roi_changed.emit(0, 0, 0, 0)
         self.update()
 
     def resizeEvent(self, event) -> None:
@@ -128,32 +142,106 @@ class ImageView(QLabel):
             Qt.TransformationMode.SmoothTransformation,
         )
         self.setPixmap(scaled)
+        self.update()
+
+    def _pixmap_rect(self):
+        pix = self.pixmap()
+        if pix is None or pix.isNull():
+            return None
+        x = (self.width() - pix.width()) // 2
+        y = (self.height() - pix.height()) // 2
+        return QRect(x, y, pix.width(), pix.height())
+
+    def _clamp_to_pixmap(self, point: QPoint):
+        rect = self._pixmap_rect()
+        if rect is None:
+            return None
+        x = max(rect.left(), min(point.x(), rect.right()))
+        y = max(rect.top(), min(point.y(), rect.bottom()))
+        return QPoint(x, y)
+
+    def _widget_rect_to_source_roi(self, rect: QRect):
+        pix_rect = self._pixmap_rect()
+        if pix_rect is None or self._frame_size is None:
+            return None
+        clipped = rect.normalized().intersected(pix_rect)
+        if clipped.width() < 2 or clipped.height() < 2:
+            return None
+        frame_w, frame_h = self._frame_size
+        sx = frame_w / pix_rect.width()
+        sy = frame_h / pix_rect.height()
+        x = int(round((clipped.left() - pix_rect.left()) * sx))
+        y = int(round((clipped.top() - pix_rect.top()) * sy))
+        w = int(round(clipped.width() * sx))
+        h = int(round(clipped.height() * sy))
+        x = max(0, min(x, frame_w - 1))
+        y = max(0, min(y, frame_h - 1))
+        w = max(1, min(w, frame_w - x))
+        h = max(1, min(h, frame_h - y))
+        return x, y, w, h
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            point = event.position().toPoint()
+            pix_rect = self._pixmap_rect()
+            if pix_rect is not None and pix_rect.contains(point):
+                self._dragging = True
+                self._drag_start = self._clamp_to_pixmap(point)
+                self._drag_end = self._drag_start
+                self.update()
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._dragging and self._drag_start is not None:
+            self._drag_end = self._clamp_to_pixmap(event.position().toPoint())
+            self.update()
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self._dragging and self._drag_start is not None:
+            self._drag_end = self._clamp_to_pixmap(event.position().toPoint())
+            self._dragging = False
+            if self._drag_end is not None:
+                roi = self._widget_rect_to_source_roi(QRect(self._drag_start, self._drag_end).normalized())
+                if roi is not None:
+                    self._roi = roi
+                    self.roi_changed.emit(*roi)
+            self._drag_start = None
+            self._drag_end = None
+            self.update()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     def paintEvent(self, event) -> None:
         super().paintEvent(event)
-        if not self._roi or not self._frame_size:
-            return
-        pix = self.pixmap()
-        if pix is None or pix.isNull():
-            return
-
-        frame_w, frame_h = self._frame_size
-        x, y, rw, rh = self._roi
-        if rw <= 0 or rh <= 0:
-            return
-
-        sx = pix.width() / frame_w
-        sy = pix.height() / frame_h
-        offset_x = (self.width() - pix.width()) / 2
-        offset_y = (self.height() - pix.height()) / 2
-
         painter = QPainter(self)
         pen = QPen(Qt.GlobalColor.red)
         pen.setWidth(2)
         painter.setPen(pen)
+        if self._dragging and self._drag_start is not None and self._drag_end is not None:
+            painter.drawRect(QRect(self._drag_start, self._drag_end).normalized())
+            return
+        if not self._roi or not self._frame_size:
+            return
+        pix_rect = self._pixmap_rect()
+        if pix_rect is None:
+            return
+        frame_w, frame_h = self._frame_size
+        x, y, rw, rh = self._roi
+        if rw <= 0 or rh <= 0:
+            return
+        sx = pix_rect.width() / frame_w
+        sy = pix_rect.height() / frame_h
         painter.drawRect(
-            int(offset_x + x * sx), int(offset_y + y * sy),
-            int(rw * sx), int(rh * sy),
+            int(pix_rect.left() + x * sx),
+            int(pix_rect.top() + y * sy),
+            max(1, int(rw * sx)),
+            max(1, int(rh * sy)),
         )
 
 
@@ -162,6 +250,7 @@ class MainWindow(QMainWindow):
     interval_requested = Signal(int)
     next_requested = Signal()
     classify_requested = Signal(str, int, int, int, int, bool)
+    output_dir_requested = Signal(str)
     undo_requested = Signal()
 
     def __init__(self) -> None:
@@ -191,10 +280,15 @@ class MainWindow(QMainWindow):
         self.roi_y = self._roi_spin()
         self.roi_w = self._roi_spin()
         self.roi_h = self._roi_spin()
-        self.crop_roi = QCheckBox("ROI のみ保存")
-
         for spin in (self.roi_x, self.roi_y, self.roi_w, self.roi_h):
-            spin.valueChanged.connect(self._update_roi_overlay)
+            spin.setReadOnly(True)
+            spin.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
+            spin.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+        self.crop_roi = QCheckBox("ROI のみ保存")
+        self.clear_roi_btn = QPushButton("ROIをクリア")
+        self.clear_roi_btn.clicked.connect(self.image_view.clear_roi)
+        self.image_view.roi_changed.connect(self._on_roi_changed)
 
         open_btn = QPushButton("動画を開く")
         open_btn.clicked.connect(self._open_video)
@@ -218,6 +312,9 @@ class MainWindow(QMainWindow):
         form.addRow("ROI W", self.roi_w)
         form.addRow("ROI H", self.roi_h)
         form.addRow("", self.crop_roi)
+        form.addRow("", self.clear_roi_btn)
+        roi_help = QLabel("画像上を左ドラッグしてROIを指定します。")
+        roi_help.setWordWrap(True)
 
         self.label_list = QListWidget()
         self.label_list.setMinimumHeight(180)
@@ -250,6 +347,7 @@ class MainWindow(QMainWindow):
         right.addWidget(self.frame_label)
         right.addWidget(self.native_label)
         right.addLayout(form)
+        right.addWidget(roi_help)
         right.addWidget(QLabel("分類 / 保存先"))
         right.addWidget(self.label_list)
         right.addLayout(label_buttons)
@@ -278,6 +376,7 @@ class MainWindow(QMainWindow):
         self.interval_requested.connect(self._worker.set_interval)
         self.next_requested.connect(self._worker.next_frame)
         self.classify_requested.connect(self._worker.classify)
+        self.output_dir_requested.connect(self._worker.set_output_dir)
         self.undo_requested.connect(self._worker.undo)
 
         self._worker.frame_ready.connect(self._on_frame)
@@ -317,6 +416,10 @@ class MainWindow(QMainWindow):
             self._label_config.labels = []
         self._ensure_label_folders()
         self._refresh_labels()
+
+        # Keep the worker-side save destination synchronized even when
+        # the project folder is changed after a video has already been opened.
+        self.output_dir_requested.emit(str(self._output_dir))
         self.statusBar().showMessage(f"Project: {self._output_dir}")
 
     def _ensure_label_folders(self) -> None:
@@ -342,7 +445,16 @@ class MainWindow(QMainWindow):
 
             shortcut = QShortcut(QKeySequence(label.key), self)
             shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
-            shortcut.activated.connect(lambda folder=label.folder: self._classify(folder))
+            shortcut.setAutoRepeat(False)
+            shortcut.activated.connect(
+                lambda folder=label.folder, name=label.name, key=label.key:
+                self._classify(folder, name, key)
+            )
+            shortcut.activatedAmbiguously.connect(
+                lambda key=label.key: self.statusBar().showMessage(
+                    f"Shortcut [{key}] is ambiguous", 3000
+                )
+            )
             self._label_shortcuts.append(shortcut)
 
     def _save_label_config(self) -> None:
@@ -466,16 +578,23 @@ class MainWindow(QMainWindow):
             self.frame_label.setText(f"Frame: {index:,}")
 
         self.image_view.set_frame(frame)
-        self._update_roi_overlay()
         self.roi_x.setMaximum(width)
         self.roi_y.setMaximum(height)
         self.roi_w.setMaximum(width)
         self.roi_h.setMaximum(height)
-
-    def _update_roi_overlay(self) -> None:
         self.image_view.set_roi(
             self.roi_x.value(), self.roi_y.value(), self.roi_w.value(), self.roi_h.value()
         )
+
+    def _on_roi_changed(self, x: int, y: int, w: int, h: int) -> None:
+        self.roi_x.setValue(x)
+        self.roi_y.setValue(y)
+        self.roi_w.setValue(w)
+        self.roi_h.setValue(h)
+        if w > 0 and h > 0:
+            self.statusBar().showMessage(f"ROI: x={x}, y={y}, w={w}, h={h}")
+        else:
+            self.statusBar().showMessage("ROIをクリアしました")
 
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
@@ -483,9 +602,26 @@ class MainWindow(QMainWindow):
     def _on_error(self, message: str) -> None:
         QMessageBox.critical(self, "Error", message)
 
-    def _classify(self, folder: str) -> None:
+    def _classify(self, folder: str, name: str | None = None, key: str | None = None) -> None:
         if self._busy:
             return
+        if self._output_dir is None:
+            QMessageBox.information(
+                self,
+                "出力先未設定",
+                "先に「プロジェクト/出力先」を選択してください。",
+            )
+            return
+
+        # Make sure the destination exists, even if it was removed externally.
+        destination = self._output_dir / folder
+        destination.mkdir(parents=True, exist_ok=True)
+
+        display = name or folder
+        prefix = f"[{key}] " if key else ""
+        self.statusBar().showMessage(
+            f"{prefix}{display} → {destination}", 2500
+        )
         self.classify_requested.emit(
             folder,
             self.roi_x.value(), self.roi_y.value(), self.roi_w.value(), self.roi_h.value(),
